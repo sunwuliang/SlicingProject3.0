@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<classpath>
+	<classpathentry kind="src" path="src"/>
+	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-1.6"/>
+	<classpathentry kind="lib" path="D:/Software/Eclipse4.2/plugins/org.eclipse.emf.ecore_2.8.3.v20130125-0546.jar"/>
+	<classpathentry kind="lib" path="D:/Software/Eclipse4.2/plugins/org.eclipse.emf.ecore.xmi_2.8.1.v20130125-0546.jar"/>
+	<classpathentry kind="lib" path="D:/Software/Eclipse4.2/plugins/org.eclipse.emf.common_2.8.0.v20130125-0546.jar"/>
+	<classpathentry kind="lib" path="D:/Software/Eclipse4.2/plugins/org.eclipse.ocl_3.2.1.v20130128-1158.jar"/>
+	<classpathentry kind="lib" path="D:/Software/Eclipse4.2/plugins/org.eclipse.ocl.ecore_3.2.0.v20130125-1817.jar"/>
+	<classpathentry kind="lib" path="D:/Software/Eclipse4.2/plugins/lpg.runtime.java_2.0.17.v201004271640.jar"/>
+	<classpathentry kind="lib" path="D:/Software/Eclipse4.2/plugins/org.eclipse.ocl.common_1.0.2.v20130125-1817.jar"/>
+	<classpathentry kind="con" path="org.eclipse.pde.core.requiredPlugins"/>
+	<classpathentry kind="lib" path="D:/Software/Eclipse4.2/plugins/org.junit_4.10.0.v4_10_0_v20120426-0900/junit.jar"/>
+	<classpathentry kind="output" path="bin"/>
+</classpath>

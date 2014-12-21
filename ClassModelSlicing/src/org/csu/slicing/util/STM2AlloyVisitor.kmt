@@ -1,0 +1,758 @@
+ /* 
+ * v 1.00 2012-2-21 $
+ * File : STM2SigVisitor.kmt
+ * Copyright : Colorado State University
+ * ----------------------------------------------------------------------------
+ * Authors :  Wuliang Sun
+ * 
+ */
+
+  
+package stm2alloy;
+
+require kermeta
+require "../org.csu.diff.util/IOMixin.kmt"  
+require "../org.csu.diff.util/QualifiedName.kmt"
+require "../org.csu.diff.util/EcoreVisitor.kmt"
+require "platform:/plugin/org.kermeta.language.mdk/src/kmt/utils/Timer.kmt"
+
+using kermeta::standard
+using kermeta::exceptions
+using ecore 
+using ecore::visitors 
+using kermeta::utils
+using qualifiedNames
+using ioutil
+
+
+ class STM2AlloyVisitor inherits Visitor, IOMixin {  	
+			
+  		attribute __name : Integer
+  		attribute transSpecs : set EClass [0..*] // Transition specilizations
+  		attribute transSpecsHash : Hashtable<String, EClass> 
+  		attribute snapComps : set EClass [0..*]  // Snapshot composite classes
+  		attribute snapRefs : set EReference [0..*] // Snapshot references
+  		attribute clsRefs : oset EReference[0..*] // Associations among snpashot composite classes
+  		attribute scSeq : seq String[1..*]        // A sequence of operation invocations
+  		attribute fioSet : set String[0..*]       // A set of first invoked operaitons
+  		attribute step3types : set String[0..*]
+  		attribute predContent : Hashtable<String, String>
+  		attribute assos : Hashtable<String, String>
+  		
+  		operation setFirstInvokedOprts(input : seq String[0..*]) : Void is
+  			do
+  				self.fioSet.empty()
+  				self.fioSet.addAll(input)
+  			end
+  		
+  		operation setScSeq(input : seq String[1..*]) : Void is
+  			do
+  				self.scSeq.empty()
+  				self.scSeq.addAll(input)
+  			end
+  	
+  	
+  		operation setPredContent(input : Hashtable<String, String>) : Void is
+  			do
+  				predContent := input
+  			end
+  			
+  		operation setAssos(input : Hashtable<String, String>) : Void is
+  			do
+  				assos := input
+  			end
+  		operation getAssos() : Hashtable<String, String> is
+  			do
+  				result := assos
+  			end
+  		
+  		operation getTransSpecsHash(pkg : EPackage) : Hashtable<String, EClass> is
+  			do
+  				if transSpecsHash == void then
+  					transSpecsHash := Hashtable<String, EClass>.new
+					self.getTransSpecs(pkg).each{cls|
+						transSpecsHash.put(cls.name, cls)
+					}
+  				end
+  				
+  				result := transSpecsHash
+  			end	
+		operation nextName(root: String) : String is
+			do
+				if __name.isVoid then
+					__name := 0
+				end
+				__name := __name + 1
+				result := root + __name.toString
+			end     			
+
+	    operation visit(visitable : Visitable) : Void is
+			do
+				//write( visitable.toString)
+			end
+
+		method visitEObject(visitable : EObject) : Void is
+			do
+				visit(visitable)
+			end
+		
+		method visitEPackage(visitable : EPackage) : Void is
+			do
+				write("module ")
+  			   	if visitable.name == void then
+  			   		writeln("nonamemodel")
+  			   	else 
+  			   		writeln(visitable.name)
+  			   	end
+		
+				writeln("open util/ordering[Snapshot] as SnapshotSequence\n")
+								
+				writeln("abstract sig ID{}")
+				write("one sig ")
+				// Get all transition specilizations
+				self.getTransSpecs(visitable).each{e|write("ID_" + e.name + ", ")}
+				writeln("ID_Null extends ID{}\n")
+				// Get all snapshot composite classes
+				self.getSnapComps(visitable).each{e|e.accept(self)}
+				self.generateSnapshotSig(visitable)			
+				write("\n\n")	
+				if self.getTransSpecs(visitable) != void then
+					var oprt2sim : EClass init self.getTransSpecs(visitable).detect{cls|
+						cls.name.equals("OperationToSimulate")
+					}
+					if oprt2sim == void then
+						//stdio.writeln("Error: cannot find the operation to simulate in the snapshot transitions model!")
+					else
+						self.getTransSpecs(visitable).remove(oprt2sim)
+					end
+					
+					self.generatePredicate(visitable)
+					write("\n\n")
+					self.generateTraceFact(visitable)
+					write("\n\n")
+					
+					self.generateStep1Pred(visitable, oprt2sim)
+					write("\n\n")
+					
+					self.generateStep2Pred(visitable, oprt2sim)
+					write("\n\n")
+					
+					var timer : Timer init Timer.new
+		 			timer.start()
+				
+					self.generateStep3Pred(visitable, oprt2sim)
+					
+					stdio.writeln(timer.getElapsedTime().toString() + " ms, worhaha")
+					
+				end
+			end
+		
+		operation generateStep3SubPred(cls : EClass) : Void is
+			do
+				write("pred Pre" + cls.name + "[snapshot : Snapshot")
+				from var it : Iterator<EAttribute> init cls.eAttributes.iterator()
+				until it.isOff loop
+					var attr : EAttribute init it.next
+					it.next
+					write(", " + attr.name.replace("Pre", "") + " : " + attr.eType.name)
+					step3types.add(attr.eType.name)
+				end
+				writeln("]{")
+				from var it : Iterator<String> init predContent.getValue(cls.name).split("and true and").iterator()
+				until it.isOff loop
+					var precondition : String init it.next
+					it.next
+					writeln(precondition.replace("Pre", "").replace("before", "snapshot"))
+				end
+				writeln("}")
+			end
+		operation generateStep3Pred(pkg : EPackage, oprt2sim : EClass) : Void is
+			do
+				var tempTransSpecs : Set<EClass> init Set<EClass>.new
+				fioSet.each{oprtName|
+					if not self.getTransSpecsHash(pkg).containsKey(oprtName) then
+						//stdio.writeln("Warning: cannot find operation " + oprtName + " in the transition snapshot model!")
+					else
+						tempTransSpecs.add(self.getTransSpecsHash(pkg).getValue(oprtName))
+					end
+				}
+				
+				generateStep3SubPred(oprt2sim)
+				writeln("")
+				tempTransSpecs.each{cls|
+					generateStep3SubPred(cls)
+					writeln("")
+				}
+				
+				writeln("pred Step3{")
+				write("  some s : Snapshot | ")
+				step3types.each{typeName | 
+					write("some one" + typeName.toLowerCase() + " : " + typeName + " | ")
+				}
+				writeln("")
+				generateStep3PredSignature(oprt2sim)
+				writeln("  and not (")
+				from var it : Iterator<EClass> init tempTransSpecs.iterator()
+				until it.isOff loop
+					var cls : EClass init it.next
+					generateStep3PredSignature(cls)
+					if it.hasNext then
+						writeln(" or")
+					end
+				end
+				writeln(")")
+				writeln("}")
+				
+				writeln("run Step3")
+			end
+		operation generateStep3PredSignature(cls : EClass) : Void is
+			do
+				write("  Pre" + cls.name + "[s")
+				from var it : Iterator<EAttribute> init cls.eAttributes.iterator()
+				until it.isOff loop
+					var attr : EAttribute init it.next
+					it.next
+					write(", one" + attr.eType.name.toLowerCase())
+				end
+				write("]")
+			end
+		
+		operation generateStep2PredSignature(cls : EClass, types : Set<String>) : String is
+			do
+				var s : String init ""
+				from var it : Iterator<EAttribute> init cls.eAttributes.iterator()
+					until it.isOff loop
+						var attr : EAttribute init it.next
+						it.next
+						var temp : String init "one" + attr.eType.name.toLowerCase()
+						s := s + ", " + temp + ", " + temp
+						types.add(attr.eType.name)
+					end
+					
+				result := s
+			end
+		operation generateStep2Pred(pkg : EPackage, oprt2sim : EClass) : Void is
+			do 
+				var oprtNo : Integer init 0
+				scSeq.each{oprtName|
+					if not self.getTransSpecsHash(pkg).containsKey(oprtName) then
+						scSeq.remove(oprtName)
+						//stdio.writeln("Warning: cannot find operation " + oprtName + " in the transition snapshot model!")
+					else
+						oprtNo := oprtNo + 1
+					end
+				}
+				
+				writeln("pred Step2{")
+				writeln("  let s0 = SnapshotSequence/first|")
+				from var i : Integer init 0
+					until i >= oprtNo loop
+						writeln("  let s" + (i + 1).toString + " = SnapshotSequence/next[s" + i.toString + "]|")
+						i := i + 1
+					end
+				
+				var i : Integer init 0
+				var types : Set<String> init Set<String>.new
+				var preds : OrderedSet<String> init OrderedSet<String>.new	
+				scSeq.each{oprtName|
+					var cls : EClass init self.getTransSpecsHash(pkg).getValue(oprtName) 
+					var s : String init ""
+					s := cls.name + "[s" + i.toString + ", s" + (i + 1).toString
+					s := s + generateStep2PredSignature(cls, types)
+					/*from var it : Iterator<EAttribute> init cls.eAttributes.iterator()
+					until it.isOff loop
+						var attr : EAttribute init it.next
+						it.next
+						var temp : String init "one" + attr.eType.name.toLowerCase()
+						s := s + ", " + temp + ", " + temp
+						types.add(attr.eType.name)
+					end*/
+					s := s + "]"
+					preds.add(s)
+					i := i + 1
+				}
+				
+				var oprt2simpred : String init "PreAndNotPost" + oprt2sim.name + "[s0, s" + oprtNo.toString
+				oprt2simpred := oprt2simpred + generateStep2PredSignature(oprt2sim, types)
+				/*from var it : Iterator<EAttribute> init oprt2sim.eAttributes.iterator()
+				until it.isOff loop
+					var attr : EAttribute init it.next
+						it.next
+						var temp : String init "one" + attr.eType.name.toLowerCase()
+						oprt2simpred := oprt2simpred + ", " + temp + ", " + temp
+						types.add(attr.eType.name)
+				end*/
+				oprt2simpred := oprt2simpred + "]"
+				write("  ")
+				types.each{t|
+					write("some one" + t.toLowerCase() + " : " + t + " | ")
+				}
+				writeln("")
+				
+				preds.each{pred|
+					writeln("  " + pred + " and") 
+				}
+				writeln("  " + oprt2simpred)
+				writeln("}")
+				writeln("run Step2 for " + (oprtNo + 1).toString)
+				writeln("")
+				
+				generateStep2Oprt2SimPred(oprt2sim)
+			end
+		operation generateStep2Oprt2SimPred(cls : EClass) : Void is
+			do
+				write("pred PreAndNotPost" + cls.name + "[before, after : Snapshot")
+				from var it : Iterator<EAttribute> init cls.eAttributes.iterator()
+				until it.isOff loop
+					var attr1 : EAttribute init it.next
+					var	attr2 : EAttribute init it.next
+					write(", " + attr1.name + ", " + attr2.name + " : " + attr1.eType.name)
+				end
+				writeln("]{")
+				
+				var content : String init self.predContent.getValue("OperationToSimulate")
+				content := "(" + content.replace("and true and", ") and \n  not (") + ")"
+				writeln("  " + content)
+				writeln("}")
+			end
+		operation generateStep1Pred(pkg : EPackage, oprt2sim : EClass) : Void is
+			do	
+				if predContent.containsKey("OperationToSimulate") then
+					writeln("pred Step1{")
+					writeln("  let first = SnapshotSequence/first|first.OperID = ID_Null")
+					writeln("  let last = SnapshotSequence/last|")
+					write("  ")
+					from var it : Iterator<EAttribute> init oprt2sim.eAttributes.iterator()
+						until it.isOff
+						loop
+							var attr : EAttribute init it.next
+							write("some " + attr.name.replace("Pre", "") + " : first." + attr.eType.name.toLowerCase() + "s|")
+							it.next
+						end
+		
+					writeln("")
+					writeln("  " + predContent.getValue("OperationToSimulate").replace("before", "first").replace("after", "last").replace("Pre", "").replace("Post", "").replace("and true and", "and\n"))
+					writeln("}")
+					writeln("run Step1 for 3")
+				else
+					//stdio.writeln("Error: cannot find the operation to simulate in the OCL specifications!")
+				end	
+			end
+			
+		operation generateTraceFact(pkg : EPackage) : Void is
+			do
+				writeln("fact traces{")
+				writeln("  all before: Snapshot - SnapshotSequence/last|")
+				writeln("      let after = SnapshotSequence/next[before]|")
+				var types : Set<String> init Set<String>.new
+				var preds : Set<String> init Set<String>.new
+				self.getTransSpecs(pkg).each{cls|
+					var s : String init cls.name + "[before, after"
+					from var it : Iterator<EAttribute> init cls.eAttributes.iterator()
+					until it.isOff loop
+						var attr : EAttribute init it.next
+						it.next
+						var temp : String init "one" + attr.eType.name.toLowerCase()
+						s := s + ", " + temp + ", " + temp
+						types.add(attr.eType.name)
+					end
+					
+					s := s + "]"
+					preds.add(s)
+				}
+				write("  ")
+				types.each{t|
+					write("some one" + t.toLowerCase() + " : " + t + " | ")
+				}
+				writeln("")
+				
+				from var it: Iterator<String> init preds.iterator
+				until it.isOff
+				loop
+						write("  " + it.next)
+						if  it.hasNext then
+							writeln("||") 
+						else
+							writeln("")
+						end
+				end
+				
+				writeln("}")
+			end
+		
+		// Old version used to generate the trace fact shown below:
+		// some l1, l2: first.locs | some u1, u2: first.users|
+		// UpdateLoc1[u1, u1, l1, l1] || UpdateLoc2[u2, u2, l2, l2]
+		/*operation generateTraceFact(pkg : EPackage) : Void is
+			do
+				writeln("fact traces{")
+				writeln("  all before: Snapshot - SnapshotSequence/last|")
+				writeln("      let after = SnapshotSequence/next[before]|")
+				var preds : OrderedSet<String> init OrderedSet<String>.new
+				self.getTransSpecs(pkg).each{cls|
+					var s : String init ""
+					s := cls.name + "[before, after"
+					from var it : Iterator<EAttribute> init cls.eAttributes.iterator()
+					until it.isOff loop
+						var attr : EAttribute init it.next
+						it.next
+						var temp : String init nextName(attr.name.replace("Pre", ""))
+						s := s + ", " + temp + ", " + temp
+						write("some " + temp + " : " + attr.eType.name + " | ")
+					end
+					s := s + "]"
+					preds.add(s)
+				}
+				
+				writeln("")
+				
+				from var it: Iterator<String> init preds.iterator
+				until it.isOff
+				loop
+						write(it.next)
+						if  it.hasNext then
+							writeln("||") 
+						else
+							writeln("")
+						end
+				end
+				
+				writeln("}")
+			end*/
+			
+		operation generatePredicate(pkg : EPackage) : Void is
+			do
+				self.getTransSpecs(pkg).each{cls|
+					write("pred " + cls.name + "[disj before, after : Snapshot")
+					
+					from var it : Iterator<EAttribute> init cls.eAttributes.iterator()
+					until it.isOff loop
+						var a1 : EAttribute init it.next
+						var a2 : EAttribute init it.next
+						write(", " + a1.name + ", " + a2.name + " : " + a2.eType.name)
+					end
+					writeln("]{")
+					writeln("// Default conditions")
+					cls.eAttributes.each{a|
+						write(a.name + " in ")
+						if a.name.indexOf("Pre") != -1 then
+							write("before.")
+						else
+							write("after.")
+						end
+						writeln(a.eType.name.toLowerCase() + "s")
+					}
+					
+					if predContent.containsKey(cls.name) then
+						writeln("\n// From operaiton pre-/postconditions")
+						var content : String init predContent.getValue(cls.name)
+						//self.getClsRefs(pkg).each{ref|
+							// Add "?" in case one association name is substring of another association name
+							// For example, PermObjLoc and ObjLoc
+						//	if content.indexOf("?" + ref.name) != -1 or content.indexOf("?" + ref.eOpposite.name) != -1 then
+						//		var assoName : String init ref.name + ref.eOpposite.name
+						//		content := content.replace("?" + ref.name, "(?)")
+						//		content := content.replace("?" + ref.eOpposite.name, "(?)")
+						//		content := content.replace("(?)", assoName)
+						//	end
+						//	
+						//}
+						writeln(content.replace("and true and ", "\n"))
+					end
+					
+					// Specify unchanged objects and links
+					self.generateUnchangedObjsLinks(pkg, cls)
+					writeln("}\n")
+				}
+			end
+		
+		operation generateUnchangedObjsLinks(pkg : EPackage, cls : EClass) : Void is
+			do
+				var uobjs : Hashtable<String, String> init Hashtable<String, String>.new
+				from var it : Iterator<EAttribute> init cls.eAttributes.iterator()
+				until it.isOff loop
+						var a : EAttribute init it.next
+						it.next
+						if uobjs.containsKey(a.eType.name) then
+							uobjs.put(a.eType.name, uobjs.getValue(a.eType.name) + " - " + a.name + "<:()")
+						else
+							uobjs.put(a.eType.name, " - " + a.name + "<:()")
+						end
+				end
+				
+				writeln("\n// Unchagned objects")
+					
+				self.getSnapRefs(pkg).each{ref|
+					if uobjs.containsKey(ref.eType.name) then
+						var tmp : String init uobjs.getValue(ref.eType.name).replace("<:()", "")
+						writeln("before." + ref.name + tmp 
+							+ " = after." + ref.name + tmp.replace("Pre", "Post"))
+					else
+						writeln("before." + ref.name + " = after." + ref.name)
+					end
+				}
+				
+				writeln("\n// Unchagned links")
+				
+				self.getClsRefs(pkg).each{ref|
+					var assoName : String init ref.name + ref.eOpposite.name
+					if uobjs.containsKey(ref.eType.name) and uobjs.containsKey(ref.eOpposite.eType.name) then
+						var tmp : String init uobjs.getValue(ref.eType.name).replace("()", "(before." + assoName + ")")
+						writeln("before." + assoName + tmp + " = after." + assoName + 
+							tmp.replace("Pre", "Post").replace("before", "after"))
+					else
+						writeln("before." + assoName + " = after." + assoName)
+					end	
+				}
+			end	
+		operation generateSnapshotSig(pkg : EPackage) : Void is
+			do	
+				writeln("sig Snapshot{")
+				writeln("OperID: one ID,")
+				writeln("// Objects")
+				self.getSnapRefs(pkg).each{ref|ref.accept(self) writeln(",")}
+				writeln("// Links")
+				self.getClsRefs(pkg).each{ref|visitAssociation(ref) writeln(",")}
+				writeln("}{")
+				writeln("// Linked objects must exist in the snapshot")
+				self.getClsRefs(pkg).each{ref|visitSnapshotInv(ref) writeln("")}
+				writeln("}")
+			end
+		
+			
+		operation visitSnapshotInv(visitable : EReference) : Void is
+			do
+				var assoName : String init visitable.name + visitable.eOpposite.name	
+				
+				write(" " + assoName + " = ")
+				write(assoName + " :> ")
+				write(visitable.eOpposite.eType.name.toLowerCase() + "s")
+				write(" & ")
+				write(visitable.eType.name.toLowerCase() + "s")
+				write(" <: " + assoName)
+			end
+		// Ecore doesn't have the association concept
+		operation visitAssociation(visitable : EReference) : Void is
+			do 
+				var assoName : String init visitable.name + visitable.eOpposite.name	
+				
+				write(" " + assoName + " : ")
+				write(visitable.eType.name + " ")
+				visitColType(visitable)
+				write("->")
+				visitETypedElement(visitable.eOpposite)
+			end
+			
+		method visitEReference(visitable : EReference) : Void is
+			do 
+				write(" " + visitable.name + " : ")
+				visitETypedElement(visitable)
+			end
+			
+		method visitEClass(visitable : EClass) : Void is
+			do 
+				// Is abstract ?
+				if visitable.~abstract == true then
+					write("abstract ")
+				end
+				
+				write("sig " + visitable.name) 
+				
+				// Has super classes?
+				if visitable.eSuperTypes.size > 0 then 
+					write(" extends ")
+					
+					from var it: Iterator<EClass> init visitable.eSuperTypes.iterator
+					until it.isOff
+					loop
+						write(it.next.name)
+						if  it.hasNext then
+							write(", ") 
+						end
+					end
+					
+				end		
+				
+				writeln("{")
+				
+				// Deal with attributes
+				
+				visitable.eAttributes.each{e| e.accept(self) writeln("")}
+				
+				writeln("}")
+				// Deal with operations
+				//write("operations\n")
+				//visitable.eOperations.each{e|e.accept(self)}
+				
+			end
+		
+		method visitEOperation(visitable: EOperation) : Void is
+			do 
+				write(" " + visitable.name)
+				write("(")
+				from var it: Iterator<EParameter> init visitable.eParameters.iterator
+				until it.isOff
+				loop
+						it.next.accept(self)
+						if  it.hasNext then
+							write(", ") 
+						end
+				end
+				write(")")
+				
+				if visitable.eType != void then
+					write(" : ")
+					visitETypedElement(visitable)
+				end
+				write("\n")
+			end
+			
+		method visitEParameter(visitable : EParameter) : Void is
+			do 
+				write(visitable.name + " : ")
+				visitETypedElement(visitable)
+			end
+			
+		method visitEAttribute(visitable : EAttribute) : Void is
+			do 
+				write(" " + visitable.name + " : ")
+				visitETypedElement(visitable)
+			end
+		
+		operation visitColType(visitable : ETypedElement) : Void is
+			do
+				var colType : String init ""
+				
+				if visitable.upperBound > 1 or visitable.upperBound == -1 then
+					colType := "set"
+				end
+				
+				if visitable.upperBound == 1 and visitable.lowerBound == 1 then
+					colType := "one"	
+				end
+				
+				if visitable.upperBound == 1 and visitable.lowerBound == 0 then
+					colType := "lone"	
+				end
+				
+				if visitable.upperBound == -1 and visitable.lowerBound >= 1 then
+					colType := "some"	
+				end
+				
+				write(colType)
+				
+			end 
+		
+		method visitETypedElement(visitable : ETypedElement) : Void is 
+			do 
+				visitColType(visitable)
+				write(" ")
+				
+				// Alloy 4.0 provides support only for Int 
+				if visitable.eType.name.equals("EInteger") or 
+					visitable.eType.name.equals("EInt") or
+					visitable.eType.name.equals("Integer")
+				then
+					write("Int")
+				// Warning for the following type: String, Boolean, Real, Float, Double..
+				else if visitable.eType.name.equals("String") or visitable.eType.name.equals("EString") or
+						visitable.eType.name.equals("Boolean") or visitable.eType.name.equals("EBoolean") or
+						visitable.eType.name.equals("Real") or visitable.eType.name.equals("EReal") or
+						visitable.eType.name.equals("Float") or visitable.eType.name.equals("EFloat") or
+						visitable.eType.name.equals("Double") or visitable.eType.name.equals("EDouble")
+					 then
+					 	//stdio.writeln("Warning: Alloy does not provide support for String, Boolean, Real, Float, Double ...")
+					 end
+					 
+					 write(visitable.eType.name)
+					 
+				end 
+			end
+		
+		
+		
+		operation getSnapRefs(pkg : EPackage) : set EReference[0..*] is
+			do
+				if snapRefs.isEmpty() then
+					var snapshot : EClass 
+					pkg.eClassifiers.each{cls|
+						if	cls.name.equals("Snapshot") then
+							snapshot := cls.asType(EClass)
+						end
+					}
+					if not snapshot.isVoid then
+						snapshot.eReferences.each{ref|
+							if ref.containment == true then
+								snapRefs.add(ref)
+							end
+						}
+					else
+						 //stdio.writeln("Error: Cannot find class Snapshot in the input snapshot transition model!")
+					end
+				end
+				result := snapRefs 
+			end
+		
+		
+		operation getSnapComps(pkg : EPackage) : set EClass[0..*] is
+			do
+				if snapComps.isEmpty() then
+					self.getSnapRefs(pkg).each{ref|
+						if ref.containment == true then
+							snapComps.add(ref.eType.asType(EClass))
+						end
+					}
+				end 
+				result := snapComps
+			end
+		
+		operation getTransSpecs(pkg : EPackage) : set EClass[0..*] is 
+			do
+				if transSpecs.isEmpty() then 
+					var trans : EClass 
+					pkg.eClassifiers.each{cls|
+						if	cls.name.equals("Transition") then
+							trans := cls.asType(EClass)
+						end
+					}
+					if not trans.isVoid then
+						pkg.eClassifiers.each{cls|
+							if EClass.isInstance(cls) then
+								if trans.isSuperTypeOf(cls.asType(EClass)) then
+									transSpecs.add(cls.asType(EClass))
+								end
+							end
+						}
+					else
+						 //stdio.writeln("Error: Cannot find class Transition in the input snapshot transition model!")
+					end
+				end
+				
+				result := transSpecs
+			end
+		
+		operation getClsRefs(pkg : EPackage) : oset EReference[0..*] is
+			do	
+				if clsRefs.isEmpty then
+					self.getSnapComps(pkg).each{cls|
+						cls.eReferences.each{ref|
+							if self.getAssos().containsKey(cls.name + ref.name) then
+								clsRefs.add(ref.eOpposite)
+							end	
+						}
+					}
+					
+					
+					self.getSnapComps(pkg).each{cls|
+						cls.eReferences.each{ref|
+							if not clsRefs.contains(ref) and not clsRefs.contains(ref.eOpposite) and not ref.eType.name.equals("Snapshot") then
+								clsRefs.add(ref)
+							end
+						}
+					}
+				end
+				result := clsRefs
+			end
+				
+}
+	
